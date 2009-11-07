@@ -1,0 +1,3 @@
+
+G_PLAY_SRC = \
+../src/ti_da830.c
