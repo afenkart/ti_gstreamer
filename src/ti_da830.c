@@ -158,6 +158,7 @@ static gboolean my_bus_callback(GstBus *bus, GstMessage *msg,
 		break;
 	case GST_MESSAGE_APPLICATION:  /* marshal information into the main thread */
 	case GST_MESSAGE_ASYNC_START:
+	case GST_MESSAGE_ASYNC_DONE:
 	case GST_MESSAGE_BUFFERING: /* caching of network streams */
 	case GST_MESSAGE_CLOCK_LOST:
 	case GST_MESSAGE_CLOCK_PROVIDE:
@@ -173,7 +174,6 @@ static gboolean my_bus_callback(GstBus *bus, GstMessage *msg,
 	case GST_MESSAGE_TAG: /* meta data: artist, title */
 		/* ignore */
 		break;
-	case GST_MESSAGE_ASYNC_DONE:
 	case GST_MESSAGE_DURATION:
 	default:
 		g_print("GStreamer: BUS_CALL %s %d\n",
@@ -187,7 +187,7 @@ static gboolean my_bus_callback(GstBus *bus, GstMessage *msg,
 
 int GStreamer_setMedia(const char *uri)
 {
-	int ret;
+	int ret = 0;
 
 	if (!g_initialized) {
 		g_error("GStreamer: library not initialized!\n");
@@ -199,7 +199,7 @@ int GStreamer_setMedia(const char *uri)
 	g_position = 0;
 	g_duration = 0;
 
-	g_print("GStreamer: seting media: %s\n", uri);
+	g_print("GStreamer: playing : %s\n", uri);
 	g_object_set(G_OBJECT(g_pipeline), "uri", uri, NULL);
 	gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_PLAYING);
 
@@ -289,9 +289,13 @@ GstElement *create_video_sink()
 	GstPad *pad;
 
 	bin = gst_bin_new("video_bin");
+#if 1
 	//sink = gst_element_factory_make ("dfbvideosink", "sink");
 	// fails: xvideosink ximagesink 
 	sink = gst_element_factory_make ("xvimagesink", "sink");
+#else
+	sink = gst_element_factory_make ("TIDmaiVideoSink", "sink");
+#endif
 	scale = gst_element_factory_make ("videoscale", "scale");
 	convert = gst_element_factory_make ("ffmpegcolorspace", "convert");
 
@@ -463,12 +467,31 @@ void GStreamer_destroy()
 	pthread_mutex_destroy(&g_mutex);
 }
 
+char g_buf[256];
+const char* create_uri(const char *rel_name)
+{
+	int ret;
+
+	/* assume it's local file system */
+	ret = (*rel_name == '/') ? snprintf(g_buf, sizeof(g_buf),  "file://%s", rel_name)
+		: snprintf(g_buf, sizeof(g_buf),  "file://%s/%s", getenv("PWD"), rel_name);
+	if (ret > sizeof(g_buf)) {
+		g_error("filename too long\n");
+		return NULL;
+	}
+	
+	return g_buf;
+}
+
+static pthread_mutex_t g_cb_mut = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_eos_cond = PTHREAD_COND_INITIALIZER;
+
 static void my_state_callback(GstState state)
 {
+	pthread_mutex_lock(&g_cb_mut);
+
 	g_print("%s, state: %s\n", __func__, gststate_get_name(state));
-	if (state == GST_STATE_NULL) /* never received, messages flushed */
-		exit(0);
-#if 1
+#if 0
 	if (state == GST_STATE_PLAYING) {
 		gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_PAUSED);
 	} else if (state == GST_STATE_PAUSED) {
@@ -480,35 +503,40 @@ static void my_state_callback(GstState state)
 	if (state == GST_STATE_READY)
 		gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL);
 #endif
-	if (state == GST_STATE_NULL)
-		exit(0);
 #endif
+	if (state == GST_STATE_NULL)
+		pthread_cond_signal(&g_eos_cond);
+
+	pthread_mutex_unlock(&g_cb_mut);
 }
 
 int main(int argc, char* argv[])
 {
-	char buf[256];
-	int ret;
+	int i, ret;
 
 	if (argc < 2) {
-		g_error("specify file\n");
+		g_error("specify file [ file2 file3 .. ]\n");
 		return -1;
 	}
 
-	ret = (*argv[1] == '/') ? snprintf(buf, sizeof(buf),  "file://%s", argv[1])
-		: snprintf(buf, sizeof(buf),  "file://%s/%s", getenv("PWD"), argv[1]);
-	if (ret > sizeof(buf)) {
-		g_error("filename too long\n");
-		return -1;
-	}
-		
-	g_printf("%s\n", buf);
-	
+	pthread_cond_init(&g_eos_cond, NULL);
+
 	GStreamer_init(NULL);
 	GStreamer_regStateCallback(&my_state_callback);
-	g_print("playing %s\n", buf);
-	GStreamer_setMedia(buf);
+
+	for (i = 1; i < argc; i++) { 
+		const char *uri_name = create_uri(argv[i]); 
+		if (!uri_name)
+			continue;
+
+		ret = GStreamer_setMedia(uri_name);
+		assert(ret == 0);
+		
+		pthread_cond_wait(&g_eos_cond, &g_cb_mut);
+	}
 
 	/* lock on main loop */
 	pthread_join(g_reader_thread, NULL);
+
+	pthread_cond_destroy(&g_eos_cond);
 }
