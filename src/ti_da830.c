@@ -488,6 +488,16 @@ const char* create_uri(const char *rel_name)
 {
 	int ret;
 
+	if (!rel_name) {
+		g_printf("URI is NULL\n");
+		return NULL;
+	}
+	
+	if (!strncmp(rel_name, "http://", strlen("http://")) ||
+			!strncmp(rel_name, "file:///", strlen("file:///"))) {
+		return rel_name;
+	}
+
 	/* assume it's local file system */
 	ret = (*rel_name == '/') ? snprintf(g_buf, sizeof(g_buf),  "file://%s", rel_name)
 		: snprintf(g_buf, sizeof(g_buf),  "file://%s/%s", getenv("PWD"), rel_name);
