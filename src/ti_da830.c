@@ -292,7 +292,7 @@ GstElement *create_video_sink()
 	GstPad *pad;
 
 	bin = gst_bin_new("video_bin");
-#if 1
+#ifdef DESKTOP 
 	//sink = gst_element_factory_make ("dfbvideosink", "sink");
 	// fails: xvideosink ximagesink 
 	sink = gst_element_factory_make ("xvimagesink", "sink");
@@ -321,11 +321,12 @@ GstElement *create_video_sink()
 		return NULL;
 	}
 
+#ifdef DESKTOP 
 	if (!gst_element_link(convert, sink)) {
 		g_error("GStreamer: failed to link video queue\n");
 		return NULL; /* TODO mem leak */
 	}
-#if 0
+#else
 	if (!link_with_caps(convert, sink, create_color_convert_caps())) {
 		/* TODO mem leak */
 		return NULL;
