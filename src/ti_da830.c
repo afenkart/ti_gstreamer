@@ -497,32 +497,6 @@ void GStreamer_destroy()
 	pthread_mutex_destroy(&g_mutex);
 }
 
-char g_buf[256];
-const char* create_uri(const char *rel_name)
-{
-	int ret;
-
-	if (!rel_name) {
-		g_printf("URI is NULL\n");
-		return NULL;
-	}
-	
-	if (!strncmp(rel_name, "http://", strlen("http://")) ||
-			!strncmp(rel_name, "file:///", strlen("file:///"))) {
-		return rel_name;
-	}
-
-	/* assume it's local file system */
-	ret = (*rel_name == '/') ? snprintf(g_buf, sizeof(g_buf),  "file://%s", rel_name)
-		: snprintf(g_buf, sizeof(g_buf),  "file://%s/%s", getenv("PWD"), rel_name);
-	if (ret > sizeof(g_buf)) {
-		g_error("filename too long\n");
-		return NULL;
-	}
-	
-	return g_buf;
-}
-
 static pthread_mutex_t g_cb_mut = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_eos_cond = PTHREAD_COND_INITIALIZER;
 
@@ -571,11 +545,7 @@ int main(int argc, char* argv[])
 	GStreamer_regStateCallback(&my_state_callback);
 
 	for (i = 1; i < argc; i++) { 
-		const char *uri_name = create_uri(argv[i]); 
-		if (!uri_name)
-			continue;
-
-		ret = GStreamer_setMedia(uri_name);
+		ret = GStreamer_setMedia(argv[i]);
 		assert(ret == 0);
 		
 		pthread_cond_wait(&g_eos_cond, &g_cb_mut);
