@@ -190,6 +190,33 @@ static gboolean my_bus_callback(GstBus *bus, GstMessage *msg,
 	return 1;
 }
 
+static int cleanup_pipe()
+{
+	GError *error = NULL;
+	GstIterator *iter;
+	GstIteratorResult res;
+	gpointer element = NULL;
+
+	iter = gst_bin_iterate_elements(GST_BIN(g_pipeline));
+	res = gst_iterator_next(iter, &element);
+
+	while (res == GST_ITERATOR_OK) {
+		gchar *name;
+
+		name = gst_object_get_name(GST_OBJECT(element));
+		if (name) {
+			g_printf("GS: runing pipe elements: %s \n", name);
+			g_free (name);
+		}
+
+		gst_object_unref(element);
+		element = NULL;
+
+		res = gst_iterator_next(iter, &element);
+	}
+	gst_iterator_free (iter);
+}
+
 int GStreamer_setMedia(const char *uri)
 {
 	GstElement *src, *sink;
@@ -200,6 +227,8 @@ int GStreamer_setMedia(const char *uri)
 		g_error("GStreamer: library not initialized!\n");
 		return -1;
 	}
+
+	cleanup_pipe();
 
 	pthread_mutex_lock(&g_mutex);
 
@@ -308,6 +337,8 @@ GstElement *create_video_sink()
 		return NULL;
 	}              
 
+	gst_object_set_name(GST_OBJECT(bin), "video-sink");
+
 	iter = gst_bin_iterate_elements(GST_BIN(bin));
 	res = gst_iterator_next (iter, &element);
 	while (res == GST_ITERATOR_OK) {
@@ -361,6 +392,8 @@ GstElement *create_audio_sink()
 		g_error("GStreamer: failed to parse audio sink pipeline\n");
 		return NULL;
 	}              
+
+	gst_object_set_name(GST_OBJECT(bin), "audio-sink");
 
 	iter = gst_bin_iterate_elements(GST_BIN(bin));
 	res = gst_iterator_next (iter, &element);
