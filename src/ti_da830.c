@@ -507,22 +507,26 @@ static void my_state_callback(GstState state)
 	pthread_mutex_lock(&g_cb_mut);
 
 	g_print("%s, state: %s\n", __func__, gststate_get_name(state));
-#if 0
-	if (state == GST_STATE_PLAYING) {
-		gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_PAUSED);
-	} else if (state == GST_STATE_PAUSED) {
-		gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_PLAYING);
-	}
-	sleep(5);
-	g_printf("wake-up\n");
-#if 0
-	if (state == GST_STATE_READY)
+	switch (state) {
+	case GST_STATE_PLAYING: 
+#if 1
+		sleep(30);
+		g_printf("wake-up\n");
 		gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL);
-#endif
-#endif
-
-	if (state == GST_STATE_NULL)
 		pthread_cond_signal(&g_eos_cond);
+		break;
+#endif
+		break;
+	case GST_STATE_PAUSED:
+	case GST_STATE_READY:
+		/* ignore */
+		break;
+	case GST_STATE_NULL:
+		pthread_cond_signal(&g_eos_cond);
+		break;
+	default:
+		assert(0);
+	}
 
 	pthread_mutex_unlock(&g_cb_mut);
 }
