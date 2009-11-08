@@ -48,6 +48,7 @@ static GstElement *g_videosink;
 static GstElement *g_audiosink;
 static const char* g_pipeline_name; /* TODO get rid of */
 
+/* call only form bus context */
 static void trigger_callback(GstState state)
 {
 	if (g_state_callback != NULL)
@@ -255,15 +256,17 @@ int GStreamer_stop()
 	g_duration = 0;
 	g_position = 0;
 
-	ret = gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL); 
+	ret = gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_READY); 
 	if (ret == GST_STATE_CHANGE_FAILURE) {
 		g_error("Failed to stop pipeline ret == %d\n", ret);
 		pthread_mutex_unlock(&g_mutex);
 		return -1;
 	}
 
+#if 0
 	/* TODO, hmm */
 	trigger_callback(GST_STATE_NULL);
+#endif
 	pthread_mutex_unlock(&g_mutex);
 	return 0;
 }
@@ -514,7 +517,17 @@ void GStreamer_destroy()
 }
 
 static pthread_mutex_t g_cb_mut = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_eos_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t g_cb_cond = PTHREAD_COND_INITIALIZER;
+
+typedef enum {
+	MY_EOS,
+	MY_NULL,
+	MY_PAUSE,
+	MY_PLAY,
+	MY_READY,
+} my_state_t;
+
+my_state_t my_state;
 
 static void my_state_callback(GstState state)
 {
@@ -523,30 +536,40 @@ static void my_state_callback(GstState state)
 	g_print("%s, state: %s\n", __func__, gststate_get_name(state));
 	switch (state) {
 	case GST_STATE_PLAYING: 
-#if 0
-		sleep(30);
-		g_printf("wake-up\n");
-		gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL);
-		pthread_cond_signal(&g_eos_cond);
-		break;
-#endif
+		my_state = MY_PLAY;
 		break;
 	case GST_STATE_PAUSED:
+		my_state = MY_PAUSE;
+		break;
 	case GST_STATE_READY:
-		/* ignore */
+		my_state = MY_READY;
 		break;
 	case GST_STATE_NULL:
-		pthread_cond_signal(&g_eos_cond);
+		my_state = MY_NULL;
 		break;
 	default:
 		assert(0);
 	}
 
+	pthread_cond_signal(&g_cb_cond);
 	pthread_mutex_unlock(&g_cb_mut);
+}
+
+struct timespec calc_delay(int sec)
+{
+	struct timeval now;
+	struct timespec timeout;
+
+	g_print("sleep for %d sec\n", sec);
+	gettimeofday(&now, NULL);
+	timeout.tv_sec = now.tv_sec + 5;
+	timeout.tv_nsec = now.tv_usec * 1000;
+	return timeout;
 }
 
 int main(int argc, char* argv[])
 {
+	struct timespec delay;
 	int i, ret;
 
 	if (argc < 2) {
@@ -554,7 +577,7 @@ int main(int argc, char* argv[])
 		return -1;
 	}
 
-	pthread_cond_init(&g_eos_cond, NULL);
+	pthread_cond_init(&g_cb_cond, NULL);
 	pthread_mutex_init(&g_cb_mut, NULL);
 
 	GStreamer_init(NULL);
@@ -563,12 +586,27 @@ int main(int argc, char* argv[])
 	for (i = 1; i < argc; i++) { 
 		ret = GStreamer_setMedia(argv[i]);
 		assert(ret == 0);
-		
-		pthread_cond_wait(&g_eos_cond, &g_cb_mut);
+
+		do {
+			ret = pthread_cond_wait(&g_cb_cond, &g_cb_mut);
+
+			if (my_state == MY_PLAY) {
+				delay = calc_delay(3);
+				ret = pthread_cond_timedwait(&g_cb_cond, &g_cb_mut, &delay);
+				if (ret == ETIMEDOUT)
+					break;
+			}
+		} while (my_state != MY_EOS && my_state != MY_NULL);
 		g_printf("GStreamer: asset done\n");
+
+		if (ret == ETIMEDOUT) {
+			GStreamer_stop();
+			pthread_cond_wait(&g_cb_cond, &g_cb_mut);
+		}
 	}
 
-	pthread_cond_destroy(&g_eos_cond);
+	GStreamer_destroy();
+	pthread_cond_destroy(&g_cb_cond);
 	pthread_mutex_destroy(&g_cb_mut);
 
 	g_printf("GStreamer: exit normally\n");
