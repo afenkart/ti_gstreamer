@@ -59,7 +59,6 @@ void GStreamer_regStateCallback(state_cb_t callback)
 	g_state_callback = callback;
 }
 
-
 static void *main_thread_proc(void *arg)
 {
 	if (!g_thread_shutdown_flag) {
@@ -140,7 +139,7 @@ static gboolean my_bus_callback(GstBus *bus, GstMessage *msg,
 
 	case GST_MESSAGE_STATE_CHANGED:
 		gst_message_parse_state_changed(msg, &oldstate, &newstate, &pending);
-#if 0   /* TODO filter for pipeline only */
+#if 0   /* noisy */
 		g_print("GStreamer: %s: State change: OLD: '%s', NEW: '%s', PENDING: '%s'\n",
 				msgSrcName,
 				gststate_get_name(oldstate),
@@ -203,14 +202,17 @@ int GStreamer_setMedia(const char *uri)
 	g_object_set(G_OBJECT(g_pipeline), "uri", uri, NULL);
 	gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_PLAYING);
 
-	pthread_mutex_unlock(&g_mutex);
+	/* TODO what is signalled? */
 	pthread_cond_signal(&g_main_cond);
+	pthread_mutex_unlock(&g_mutex);
 
 	return ret;
 }
 
 int GStreamer_stop()
 {
+	GstStateChangeReturn ret; 
+
 	g_print("GStreamer: stop\n");
 	if (!g_initialized) {
 		g_error("GStreamer: library not initialized!\n");
@@ -222,14 +224,15 @@ int GStreamer_stop()
 	g_duration = 0;
 	g_position = 0;
 
-	if (gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL) ==
-			GST_STATE_CHANGE_FAILURE) {
+	ret = gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL); 
+	if (ret == GST_STATE_CHANGE_FAILURE) {
+		g_error("Failed to stop pipeline ret == %d\n", ret);
 		pthread_mutex_unlock(&g_mutex);
 		return -1;
 	}
 
-	//trigger_callback(GST_STATE_NULL);
-
+	/* TODO, hmm */
+	trigger_callback(GST_STATE_NULL);
 	pthread_mutex_unlock(&g_mutex);
 	return 0;
 }
@@ -318,15 +321,16 @@ GstElement *create_video_sink()
 		return NULL;
 	}
 
-	gst_element_link(convert, sink);
+	if (!gst_element_link(convert, sink)) {
+		g_error("GStreamer: failed to link video queue\n");
+		return NULL; /* TODO mem leak */
+	}
 #if 0
 	if (!link_with_caps(convert, sink, create_color_convert_caps())) {
 		/* TODO mem leak */
 		return NULL;
 	}
 #endif
- 
-	//gst_element_link_many(scale, convert, sink, NULL);
 
 	return bin;
 }
@@ -343,19 +347,22 @@ GstElement *create_audio_sink()
 
 	if (!bin || !sink || !resample || !convert) {
 		g_error("GStreamer: failed to create audio-sink elements\n");
-		return NULL;
+		return NULL; /* TODO mem leak */
 	}
 
 	/* First add the elements to the bin */
 	gst_bin_add_many(GST_BIN(bin), convert, resample, sink, NULL);
 
 	/* add ghostpad */
-	pad = gst_element_get_static_pad (resample, "sink");
+	pad = gst_element_get_static_pad(resample, "sink");
 	gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad));
 	gst_object_unref(GST_OBJECT(pad));
 
 	/* link the elements */
-	gst_element_link_many(resample, convert, sink);
+	if (!gst_element_link_many(resample, convert, sink, NULL)) {
+		g_error("GStreamer: failed to link audio queue\n");
+		return NULL; /* TODO mem leak */
+	}
 
 	return bin;
 }
@@ -365,6 +372,7 @@ int GStreamer_init(const char *mplayer)
 	GError* error;
 	GstBus *bus;
 	GstElement *videosink, *audiosink;
+	int err;
 
 	if (g_initialized)
 		g_error("GStreamer: already initialized, call destroy first!\n");
@@ -373,12 +381,19 @@ int GStreamer_init(const char *mplayer)
 	g_duration = 0;
 	g_position = 0;
 
+	/* pthread synchronization */
 	pthread_mutex_init(&g_mutex, NULL);
+	err = pthread_cond_init(&g_main_cond, NULL);
+	if (err) {
+		g_error("GStreamer: failed to initialize main condition %s\n",
+				strerror(errno));
+		return -1;
+	}
 
+	/* init gstreamer library */
 	if (!gst_init_check(NULL, NULL, &error)) {
 		g_error("GStreamer: failed to initialize gstreamer library: [%d] %s\n",
 				error->code, error->message);
-
 		g_error_free(error);
 		return -1;
 	}
@@ -419,23 +434,23 @@ int GStreamer_init(const char *mplayer)
 	/* start main loop */
 	g_main_loop = g_main_loop_new(NULL, FALSE);
 
-	if (pthread_cond_init(&g_main_cond, NULL) != 0) {
-		g_error("GStreamer: failed to initialize main condition %s\n",
-				strerror(errno));
-		return -1;
-	}
-
-	if (pthread_create(&g_reader_thread, NULL, main_thread_proc, NULL) != 0) {
+	err = pthread_create(&g_reader_thread, NULL, main_thread_proc, NULL);
+	if (err) {
 		g_error("GStreamer: failed to launch gstreamer main thread %s\n",
 				strerror(errno));
-		pthread_cond_destroy(&g_main_cond);
-		return -1;
+		goto err_pthread;
 	}
 
 	g_print("GStreamer: SUCCESSFULLY INITIALIZED\n");
 	g_initialized = 1;
 
 	return 0;
+
+err_pthread:
+	pthread_cond_destroy(&g_main_cond);
+	pthread_mutex_destroy(&g_mutex);
+	
+	return err;
 }
 
 void GStreamer_destroy()
@@ -504,6 +519,7 @@ static void my_state_callback(GstState state)
 		gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL);
 #endif
 #endif
+
 	if (state == GST_STATE_NULL)
 		pthread_cond_signal(&g_eos_cond);
 
@@ -520,6 +536,7 @@ int main(int argc, char* argv[])
 	}
 
 	pthread_cond_init(&g_eos_cond, NULL);
+	pthread_mutex_init(&g_cb_mut, NULL);
 
 	GStreamer_init(NULL);
 	GStreamer_regStateCallback(&my_state_callback);
@@ -533,10 +550,12 @@ int main(int argc, char* argv[])
 		assert(ret == 0);
 		
 		pthread_cond_wait(&g_eos_cond, &g_cb_mut);
+		g_printf("GStreamer: asset done\n");
 	}
 
-	/* lock on main loop */
-	pthread_join(g_reader_thread, NULL);
-
 	pthread_cond_destroy(&g_eos_cond);
+	pthread_mutex_destroy(&g_cb_mut);
+
+	g_printf("GStreamer: exit normally\n");
+	return 0;
 }
