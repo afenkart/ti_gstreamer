@@ -41,7 +41,11 @@ static long g_position = 0;
 
 static GMainLoop *g_main_loop;
 static GstElement *g_pipeline;
-static const char* g_pipeline_name;
+static GstElement *g_filesrc;
+static GstElement *g_httpsrc;
+static GstElement *g_videosink;
+static GstElement *g_audiosink;
+static const char* g_pipeline_name; /* TODO get rid of */
 
 static void trigger_callback(GstState state)
 {
@@ -199,8 +203,9 @@ int GStreamer_setMedia(const char *uri)
 	g_duration = 0;
 
 	g_print("GStreamer: playing : %s\n", uri);
-	g_object_set(G_OBJECT(g_pipeline), "uri", uri, NULL);
+	g_object_set(G_OBJECT(g_httpsrc), "location", uri, NULL);
 	gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_PLAYING);
+	//gst_element_get_state(GST_ELEMENT(g_pipeline), GST_STATE_PLAYING);
 
 	/* TODO what is signalled? */
 	pthread_cond_signal(&g_main_cond);
@@ -237,101 +242,63 @@ int GStreamer_stop()
 	return 0;
 }
 
-static GstCaps *create_color_convert_caps()
-{
-	GstCaps *caps;
-	caps = gst_caps_new_simple ("video/x-raw-rgb",
-			"bpp", G_TYPE_INT, 16,
-			NULL);
-
-	/* TODO no error checking? */
-	return caps;
-}
-
-static GstCaps *create_size_convert_caps()
-{
-	GstCaps *caps;
-	caps = gst_caps_new_simple ("video/x-raw-yuv",
-			"format", GST_TYPE_FOURCC, GST_MAKE_FOURCC ('I', '4', '2', '0'),
-			"width", G_TYPE_INT, 320,
-			"height", G_TYPE_INT, 240,
-			NULL);
-
-	/* TODO no error checking? */
-	return caps;
-}
-
-static gboolean link_with_caps(GstElement* elt1, GstElement *elt2,
-		GstCaps *caps)
-{
-	gboolean link_ok;
-
-	if (!caps) {
-		g_error("GStreamer: caps is NULL\n");
-		return 0;
-	}
-
-	g_print("link %s and %s with %s\n", gst_element_get_name(elt1),
-			gst_element_get_name(elt2),
-			gst_caps_to_string(caps));
-
-	link_ok = gst_element_link_filtered(elt1, elt2, caps);
-	gst_caps_unref (caps);
-
-	if (!link_ok) {
-		g_warning ("Failed to link elements!");
-		return 0;
-	}
-
-	return link_ok;
-}
-
 GstElement *create_video_sink()
 {
-	GstElement *sink, *scale, *bin, *convert;
+	GstElement *bin, *decoder = NULL;
+	GstIterator *iter;
+	GstIteratorResult res;
+	GError *error = NULL;
 	GstPad *pad;
+	gpointer element = NULL;
 
-	bin = gst_bin_new("video_bin");
-#ifdef DESKTOP 
-	//sink = gst_element_factory_make ("dfbvideosink", "sink");
-	// fails: xvideosink ximagesink 
-	sink = gst_element_factory_make ("xvimagesink", "sink");
-#else
-	sink = gst_element_factory_make ("TIDmaiVideoSink", "sink");
-#endif
-	scale = gst_element_factory_make ("videoscale", "scale");
-	convert = gst_element_factory_make ("ffmpegcolorspace", "convert");
+	/* create pipeline */                                                                                 
+	bin = gst_parse_launch_full("TIViddec2 genTimeStamps=FALSE \
+			    engineName=decode \
+			    codecName=h264dec numFrames=-1 \
+			! videoscale method=0 \
+			! video/x-raw-yuv, format=(fourcc)I420, width=320, height=240 \
+			! ffmpegcolorspace \
+			! video/x-raw-rgb, bpp=16 \
+			! TIDmaiVideoSink displayStd=fbdev displayDevice=/dev/fb0 videoStd=QVGA \
+			    videoOutput=LCD resizer=FALSE accelFrameCopy=TRUE",
+			NULL, 0, &error);                                      
 
-	if (!bin || !sink || !scale || !convert) {
-		g_error("GStreamer: failed to create video-sink elements\n");
+	if (!g_pipeline) {
+		g_error("GStreamer: failed to parse pipeline\n");
+		return NULL;
+	}              
+
+	iter = gst_bin_iterate_elements(GST_BIN(bin));
+	res = gst_iterator_next (iter, &element);
+	while (res == GST_ITERATOR_OK) {
+		gchar *name;
+
+		name = gst_object_get_name(GST_OBJECT (element));
+		if (name) {
+			if (!strcmp(name, "tividdec20")) {
+				decoder = GST_ELEMENT(element); 
+			}
+			g_printf("GS: video sink element: %s \n", name);
+			g_free (name);
+		}
+
+		gst_object_unref (element);
+		element = NULL;
+
+		res = gst_iterator_next (iter, &element);
+	}
+	gst_iterator_free (iter);
+
+	if (!decoder) {
+		/* mem leak */
+		g_printf("decoder element not found\n");
 		return NULL;
 	}
-
-	/* First add the elements to the bin */
-	gst_bin_add_many(GST_BIN(bin), convert, scale, sink, NULL);
 
 	/* add ghostpad */
-	pad = gst_element_get_static_pad (scale, "sink");
+	pad = gst_element_get_static_pad (decoder, "sink");
 	gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad));
 	gst_object_unref(GST_OBJECT(pad));
-
-	/* link the elements */
-	if (!link_with_caps(scale, convert, create_size_convert_caps())) {
-		/* TODO mem leak */
-		return NULL;
-	}
-
-#ifdef DESKTOP 
-	if (!gst_element_link(convert, sink)) {
-		g_error("GStreamer: failed to link video queue\n");
-		return NULL; /* TODO mem leak */
-	}
-#else
-	if (!link_with_caps(convert, sink, create_color_convert_caps())) {
-		/* TODO mem leak */
-		return NULL;
-	}
-#endif
 
 	return bin;
 }
@@ -354,16 +321,16 @@ GstElement *create_audio_sink()
 	/* First add the elements to the bin */
 	gst_bin_add_many(GST_BIN(bin), convert, resample, sink, NULL);
 
-	/* add ghostpad */
-	pad = gst_element_get_static_pad(resample, "sink");
-	gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad));
-	gst_object_unref(GST_OBJECT(pad));
-
 	/* link the elements */
 	if (!gst_element_link_many(resample, convert, sink, NULL)) {
 		g_error("GStreamer: failed to link audio queue\n");
 		return NULL; /* TODO mem leak */
 	}
+
+	/* add ghostpad */
+	pad = gst_element_get_static_pad(resample, "sink");
+	gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad));
+	gst_object_unref(GST_OBJECT(pad));
 
 	return bin;
 }
@@ -399,12 +366,9 @@ int GStreamer_init(const char *mplayer)
 		return -1;
 	}
 
+#if 1
 	/* create pipeline */
-	g_pipeline = gst_element_factory_make("playbin", "player");
-	if (!g_pipeline) {
-		g_error("GStreamer: playbin plugin not found\n");
-		return -1;
-	}
+	g_pipeline = gst_pipeline_new("pipeline");
 	g_pipeline_name = gst_element_get_name(GST_ELEMENT(g_pipeline));
 
 	/* register callback */
@@ -413,18 +377,31 @@ int GStreamer_init(const char *mplayer)
 	gst_object_unref(bus);
 
 	/* hardcode audio/video sink */
-	if (!(videosink = create_video_sink())) {
+	g_videosink = create_video_sink();
+	g_audiosink = create_audio_sink();
+
+	if (!g_videosink || !g_audiosink) {
 		/* TODO memory leak */
+		g_error("GStreamer: failed to create sink elements\n");
 		return -1;
 	}
 
-	if (!(audiosink = create_audio_sink())) {
+	/* prepare http/file src */
+	g_filesrc = gst_element_factory_make ("filesrc", "filesrc");
+	g_httpsrc = gst_element_factory_make ("souphttpsrc", "httpsrc");
+
+	if (!g_filesrc || !g_httpsrc) {
 		/* TODO memory leak */
+		g_error("GStreamer: failed to create src elements %x %x\n", g_filesrc, g_httpsrc);
 		return -1;
 	}
 
-	g_object_set(G_OBJECT(g_pipeline), "video-sink", videosink, NULL);
-	g_object_set(G_OBJECT(g_pipeline), "audio-sink", audiosink, NULL);
+	gst_bin_add_many(GST_BIN(g_pipeline), g_httpsrc, g_videosink, NULL);
+
+	if (!gst_element_link(g_httpsrc, g_videosink)) {
+		g_error("GStreamer: failed to link src with sink\n");
+	}
+#endif
 
 	/* initialize pipeline */
 	if (gst_element_set_state(g_pipeline, GST_STATE_READY) ==
@@ -519,7 +496,7 @@ static void my_state_callback(GstState state)
 	g_print("%s, state: %s\n", __func__, gststate_get_name(state));
 	switch (state) {
 	case GST_STATE_PLAYING: 
-#if 1
+#if 0
 		sleep(30);
 		g_printf("wake-up\n");
 		gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL);
