@@ -23,6 +23,7 @@
 //#include "libGScontrol.h"
 
 #define GSTREAMER_PARAM_SEEK_REL  "0"
+#define DESKTOP
 
 static int g_initialized = 0;
 
@@ -275,8 +276,11 @@ GstElement *create_video_sink()
 	GError *error = NULL;
 	GstPad *pad;
 	gpointer element = NULL;
+	const char* decoder_name;
 
+#ifndef DESKTOP 
 	/* create pipeline */                                                                                 
+	decoder_name = "tividdec20";
 	bin = gst_parse_launch_full("TIViddec2 genTimeStamps=FALSE \
 			    engineName=decode \
 			    codecName=h264dec numFrames=-1 \
@@ -287,9 +291,17 @@ GstElement *create_video_sink()
 			! TIDmaiVideoSink displayStd=fbdev displayDevice=/dev/fb0 videoStd=QVGA \
 			    videoOutput=LCD resizer=FALSE accelFrameCopy=TRUE",
 			NULL, 0, &error);                                      
+#else
+	decoder_name = "decodebin";
+	bin = gst_parse_launch_full("decodebin \
+			! videoscale method=0 \
+			! video/x-raw-yuv, format=(fourcc)I420, width=320, height=240 \
+			! xvimagesink",
+			NULL, 0, &error);                                      
+#endif
 
-	if (!g_pipeline) {
-		g_error("GStreamer: failed to parse pipeline\n");
+	if (!bin) {
+		g_error("GStreamer: failed to parse video sink pipeline\n");
 		return NULL;
 	}              
 
@@ -300,7 +312,7 @@ GstElement *create_video_sink()
 
 		name = gst_object_get_name(GST_OBJECT (element));
 		if (name) {
-			if (!strcmp(name, "tividdec20")) {
+			if (!strncmp(name, decoder_name, strlen(decoder_name))) {
 				decoder = GST_ELEMENT(element); 
 			}
 			g_printf("GS: video sink element: %s \n", name);
@@ -342,6 +354,10 @@ GstElement *create_audio_sink()
 			! autoaudiosink",
 			NULL, 0, &error);                                      
 
+	if (!bin) {
+		g_error("GStreamer: failed to parse audio sink pipeline\n");
+		return NULL;
+	}              
 
 	iter = gst_bin_iterate_elements(GST_BIN(bin));
 	res = gst_iterator_next (iter, &element);
