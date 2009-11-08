@@ -207,7 +207,7 @@ int GStreamer_setMedia(const char *uri)
 	g_print("GStreamer: playing : %s\n", uri);
 
 	is_video = strstr(uri, "264") != NULL;
-	is_http = !strncmp(uri, "http://", sizeof("http://"));
+	is_http = !strncmp(uri, "http://", strlen("http://"));
 
 	g_printf("GStreamer: playing %s via %s\n", is_video ? "video" : "audio",
 			is_http ? "http" : "filesrc");
