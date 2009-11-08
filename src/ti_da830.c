@@ -190,6 +190,8 @@ static gboolean my_bus_callback(GstBus *bus, GstMessage *msg,
 
 int GStreamer_setMedia(const char *uri)
 {
+	GstElement *src, *sink;
+	int is_video, is_http = 1;
 	int ret = 0;
 
 	if (!g_initialized) {
@@ -203,9 +205,32 @@ int GStreamer_setMedia(const char *uri)
 	g_duration = 0;
 
 	g_print("GStreamer: playing : %s\n", uri);
-	g_object_set(G_OBJECT(g_httpsrc), "location", uri, NULL);
+
+	is_video = strstr(uri, "264") != NULL;
+	is_http = !strncmp(uri, "http://", sizeof("http://"));
+
+	g_printf("GStreamer: playing %s via %s\n", is_video ? "video" : "audio",
+			is_http ? "http" : "filesrc");
+
+	if (is_http)
+		g_object_set(G_OBJECT(g_httpsrc), "location", uri, NULL);
+	else
+		g_object_set(G_OBJECT(g_filesrc), "location", uri, NULL);
+
+	sink = (is_video) ? g_videosink : g_audiosink;
+	src = (is_http) ? g_httpsrc : g_filesrc;
+
+	gst_bin_add_many(GST_BIN(g_pipeline), src, sink, NULL);
+
+	if (!gst_element_link(src, sink)) {
+		g_error("GStreamer: failed to link %s with %s\n",
+				gst_element_get_name(src),
+				gst_element_get_name(sink));
+		return -1;
+	}
+
 	gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_PLAYING);
-	//gst_element_get_state(GST_ELEMENT(g_pipeline), GST_STATE_PLAYING);
+	//gst_element_get_state(GST_ELEMENT(g_pipeline), ...);
 
 	/* TODO what is signalled? */
 	pthread_cond_signal(&g_main_cond);
@@ -305,30 +330,48 @@ GstElement *create_video_sink()
 
 GstElement *create_audio_sink()
 {
-	GstElement *sink, *resample, *bin, *convert;
+	GstElement *bin, *decoder = NULL;
+	GstIterator *iter;
+	GstIteratorResult res;
+	GError *error = NULL;
 	GstPad *pad;
+	gpointer element = NULL;
 
-	bin = gst_bin_new("audio_bin");
-	convert = gst_element_factory_make ("audioconvert", "convert");
-	resample = gst_element_factory_make ("audioresample", "resample");
-	sink = gst_element_factory_make ("alsasink", "sink");
+	bin = gst_parse_launch_full("decodebin ! queue ! audioconvert \
+			! audioresample \
+			! autoaudiosink",
+			NULL, 0, &error);                                      
 
-	if (!bin || !sink || !resample || !convert) {
-		g_error("GStreamer: failed to create audio-sink elements\n");
-		return NULL; /* TODO mem leak */
+
+	iter = gst_bin_iterate_elements(GST_BIN(bin));
+	res = gst_iterator_next (iter, &element);
+	while (res == GST_ITERATOR_OK) {
+		gchar *name;
+
+		name = gst_object_get_name(GST_OBJECT (element));
+		if (name) {
+			if (!strncmp(name, "decodebin", strlen("decodebin"))) {
+				decoder = GST_ELEMENT(element); 
+			}
+			g_printf("GS: audio sink element: %s \n", name);
+			g_free (name);
+		}
+
+		gst_object_unref (element);
+		element = NULL;
+
+		res = gst_iterator_next (iter, &element);
 	}
+	gst_iterator_free (iter);
 
-	/* First add the elements to the bin */
-	gst_bin_add_many(GST_BIN(bin), convert, resample, sink, NULL);
-
-	/* link the elements */
-	if (!gst_element_link_many(resample, convert, sink, NULL)) {
-		g_error("GStreamer: failed to link audio queue\n");
-		return NULL; /* TODO mem leak */
+	if (!decoder) {
+		/* mem leak */
+		g_printf("decoder element not found\n");
+		return NULL;
 	}
 
 	/* add ghostpad */
-	pad = gst_element_get_static_pad(resample, "sink");
+	pad = gst_element_get_static_pad(decoder, "sink");
 	gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad));
 	gst_object_unref(GST_OBJECT(pad));
 
@@ -366,7 +409,6 @@ int GStreamer_init(const char *mplayer)
 		return -1;
 	}
 
-#if 1
 	/* create pipeline */
 	g_pipeline = gst_pipeline_new("pipeline");
 	g_pipeline_name = gst_element_get_name(GST_ELEMENT(g_pipeline));
@@ -396,14 +438,9 @@ int GStreamer_init(const char *mplayer)
 		return -1;
 	}
 
-	gst_bin_add_many(GST_BIN(g_pipeline), g_httpsrc, g_videosink, NULL);
-
-	if (!gst_element_link(g_httpsrc, g_videosink)) {
-		g_error("GStreamer: failed to link src with sink\n");
-	}
-#endif
-
 	/* initialize pipeline */
+	/* TODO do for audio/video pipe separately */
+
 	if (gst_element_set_state(g_pipeline, GST_STATE_READY) ==
 		GST_STATE_CHANGE_FAILURE) {
 	  g_error("GStreamer: could not set pipeline to ready\n");
