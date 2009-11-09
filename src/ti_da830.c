@@ -23,7 +23,7 @@
 //#include "libGScontrol.h"
 
 #define GSTREAMER_PARAM_SEEK_REL  "0"
-#define DESKTOP
+//#define DESKTOP
 
 static int g_initialized = 0;
 
@@ -44,9 +44,14 @@ static GMainLoop *g_main_loop;
 static GstElement *g_pipeline;
 static GstElement *g_filesrc;
 static GstElement *g_httpsrc;
+#if 0
 static GstElement *g_videosink;
 static GstElement *g_audiosink;
+#endif
 static const char* g_pipeline_name; /* TODO get rid of */
+
+GstElement *create_video_sink(void);
+GstElement *create_audio_sink(void);
 
 /* call only form bus context */
 static void trigger_callback(GstState state)
@@ -190,12 +195,16 @@ static gboolean my_bus_callback(GstBus *bus, GstMessage *msg,
 	return 1;
 }
 
-static int cleanup_pipe()
+static int cleanup_pipeline()
 {
 	GError *error = NULL;
 	GstIterator *iter;
 	GstIteratorResult res;
-	gpointer element = NULL;
+	gpointer elts[2], element = NULL;
+	int i, ct;
+
+	ct = 0;
+	memset(elts, 0, sizeof(elts));
 
 	iter = gst_bin_iterate_elements(GST_BIN(g_pipeline));
 	res = gst_iterator_next(iter, &element);
@@ -203,9 +212,13 @@ static int cleanup_pipe()
 	while (res == GST_ITERATOR_OK) {
 		gchar *name;
 
+		assert(ct < (sizeof elts / sizeof(elts[0])));
+		elts[ct] = element;
+		ct++;
+
 		name = gst_object_get_name(GST_OBJECT(element));
 		if (name) {
-			g_printf("GS: runing pipe elements: %s \n", name);
+			g_printf("GS: removing pipe element: %s \n", name);
 			g_free (name);
 		}
 
@@ -215,6 +228,10 @@ static int cleanup_pipe()
 		res = gst_iterator_next(iter, &element);
 	}
 	gst_iterator_free (iter);
+
+	for (i = 0; i < ct; i++) {
+		gst_bin_remove(GST_BIN(g_pipeline), elts[i]);
+	}
 }
 
 int GStreamer_setMedia(const char *uri)
@@ -228,7 +245,7 @@ int GStreamer_setMedia(const char *uri)
 		return -1;
 	}
 
-	cleanup_pipe();
+	cleanup_pipeline();
 
 	pthread_mutex_lock(&g_mutex);
 
@@ -248,7 +265,8 @@ int GStreamer_setMedia(const char *uri)
 	else
 		g_object_set(G_OBJECT(g_filesrc), "location", uri, NULL);
 
-	sink = (is_video) ? g_videosink : g_audiosink;
+	//sink = (is_video) ? g_videosink : g_audiosink;
+	sink = (is_video) ? create_video_sink() : create_audio_sink();
 	src = (is_http) ? g_httpsrc : g_filesrc;
 
 	gst_bin_add_many(GST_BIN(g_pipeline), src, sink, NULL);
@@ -273,6 +291,7 @@ int GStreamer_setMedia(const char *uri)
 int GStreamer_stop()
 {
 	GstStateChangeReturn ret; 
+	GstState state, pending;
 
 	g_print("GStreamer: stop\n");
 	if (!g_initialized) {
@@ -285,12 +304,23 @@ int GStreamer_stop()
 	g_duration = 0;
 	g_position = 0;
 
-	ret = gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_READY); 
+	/* */
+	gst_element_get_state(GST_ELEMENT(g_pipeline), &state, &pending,
+			GST_CLOCK_TIME_NONE);
+
+	ret = gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL); 
 	if (ret == GST_STATE_CHANGE_FAILURE) {
 		g_error("Failed to stop pipeline ret == %d\n", ret);
 		pthread_mutex_unlock(&g_mutex);
 		return -1;
 	}
+
+	gst_element_get_state(GST_ELEMENT(g_pipeline), &state, &pending,
+			GST_CLOCK_TIME_NONE);
+	g_print("GStreamer: State change: CUR: '%s', PENDING: '%s'\n",
+			gststate_get_name(state),
+			gststate_get_name(pending));
+
 
 #if 0
 	/* TODO, hmm */
@@ -470,6 +500,9 @@ int GStreamer_init(const char *mplayer)
 	gst_bus_add_watch(bus, my_bus_callback, NULL);
 	gst_object_unref(bus);
 
+#if 0
+	/* TODO unlinked when removed from pipeline */
+
 	/* hardcode audio/video sink */
 	g_videosink = create_video_sink();
 	g_audiosink = create_audio_sink();
@@ -479,6 +512,7 @@ int GStreamer_init(const char *mplayer)
 		g_error("GStreamer: failed to create sink elements\n");
 		return -1;
 	}
+#endif
 
 	/* prepare http/file src */
 	g_filesrc = gst_element_factory_make ("filesrc", "filesrc");
@@ -489,6 +523,9 @@ int GStreamer_init(const char *mplayer)
 		g_error("GStreamer: failed to create src elements %x %x\n", g_filesrc, g_httpsrc);
 		return -1;
 	}
+
+	g_object_ref(g_filesrc);
+	g_object_ref(g_httpsrc);
 
 	/* initialize pipeline */
 	/* TODO do for audio/video pipe separately */
@@ -543,6 +580,8 @@ void GStreamer_destroy()
 
 	gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL);
 	gst_object_unref(GST_OBJECT(g_pipeline));
+	gst_object_unref(GST_OBJECT(g_filesrc));
+	gst_object_unref(GST_OBJECT(g_httpsrc));
 
 	sleep(1);
 	pthread_mutex_unlock(&g_mutex);
