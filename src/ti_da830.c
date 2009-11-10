@@ -3,23 +3,10 @@
 #endif
 
 #include <gst/gst.h>
-#include <string.h>
-#if 0
-#include <stdlib.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
+#include <string.h>
 #include <signal.h>
-#include <sys/select.h>
-#include <sys/time.h>
-#include <stdio.h>
-#include <pthread.h>
 #include <assert.h>
-#endif
 
 #define DESKTOP
 
@@ -28,7 +15,7 @@ static const char video_pipe_desc[] =  "TIViddec2 genTimeStamps=FALSE \
 			    engineName=decode \
 			    codecName=h264dec numFrames=-1 \
 			! videoscale method=0 \
-			! video/x-raw-yuv, format=\(fourcc\)I420, width=320, height=240 \
+			! video/x-raw-yuv, format=(fourcc)I420, width=320, height=240 \
 			! ffmpegcolorspace \
 			! video/x-raw-rgb, bpp=16 \
 			! TIDmaiVideoSink displayStd=fbdev displayDevice=/dev/fb0 videoStd=QVGA \
@@ -36,7 +23,7 @@ static const char video_pipe_desc[] =  "TIViddec2 genTimeStamps=FALSE \
 #else
 static const char video_pipe_desc[] = "decodebin \
 			! videoscale method=0 \
-			! video/x-raw-yuv, format=\(fourcc\)I420, width=320, height=240 \
+			! video/x-raw-yuv, format=(fourcc)I420, width=320, height=240 \
 			! xvimagesink";
 #endif
 
@@ -157,7 +144,6 @@ static gboolean my_bus_callback(GstBus *bus, GstMessage *msg,
 	return 1;
 }
 
-
 GstElement *create_video_pipe(const char *filename)
 {
 	GstElement *bin;
@@ -215,6 +201,69 @@ GstElement *create_audio_pipe(const char *filename)
 	return bin;
 }
 
+//static void handler(int sig, siginfo_t *si, void *uc)
+typedef void (*sa_sigaction_t)(int, siginfo_t *, void *);
+void my_handler(int, siginfo_t*, void *);
+
+#define CLOCKID CLOCK_REALTIME
+#define SIG SIGRTMIN
+
+timer_t g_timerid;
+int init_timer(void)
+{
+	struct sigevent sev;
+	struct sigaction sa;
+	int err;
+
+	/* create timer */
+	sev.sigev_notify = SIGEV_SIGNAL;
+	sev.sigev_signo = SIG;
+	sev.sigev_value.sival_ptr = &g_timerid;
+
+	err = timer_create(CLOCK_REALTIME, &sev, &g_timerid);
+	if (err)
+		goto err;
+
+	printf("Timer ID is 0x%lx\n", (long)g_timerid);
+
+	/* install signal handler */
+	sa.sa_flags = SA_SIGINFO;
+	sa.sa_sigaction = my_handler;
+	sigemptyset(&sa.sa_mask);
+
+	err = sigaction(SIG, &sa, NULL);
+	if (err)
+		goto err_del_timer;
+
+	printf("Establishing handler for signal %d\n", SIG);
+
+	return 0;
+
+err_del_timer:
+	timer_delete(g_timerid);
+err:
+	return err;
+}
+
+void start_timer(int sec)
+{
+	struct itimerspec value;
+	assert(g_timerid);
+
+	value.it_value.tv_sec = sec;
+	value.it_value.tv_nsec = 0;
+
+	value.it_interval.tv_sec = sec;
+	value.it_interval.tv_nsec = 0;
+
+	timer_settime(g_timerid, 0, &value, NULL);
+}
+
+void my_handler(int sig, siginfo_t *si, void *uc)
+{
+	printf("timer xx\n");
+}
+
 GMainLoop *g_main_loop;
 static void trigger_callback(GstState state)
 {
@@ -226,6 +275,7 @@ static void trigger_callback(GstState state)
 		break;
 	case GST_STATE_PLAYING:
 		g_printf("pipe is playing\n");
+		start_timer(20);
 		break;
 	case GST_STATE_PAUSED:
 		g_printf("pipe is paused\n");
@@ -280,6 +330,7 @@ int main(int argc, char* argv[])
 
 	/* start main loop */
 	g_print("GStreamer: SUCCESSFULLY INITIALIZED\n");
+	init_timer();
 
 	g_main_loop = g_main_loop_new(NULL, FALSE);
 	g_main_loop_run(g_main_loop);
