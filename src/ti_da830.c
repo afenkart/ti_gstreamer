@@ -20,17 +20,10 @@
 
 #include <gst/gst.h>
 
-//#include "libGScontrol.h"
-
 #define GSTREAMER_PARAM_SEEK_REL  "0"
-//#define DESKTOP
+#define DESKTOP
 
 static int g_initialized = 0;
-
-static pthread_mutex_t g_mutex;
-
-static pthread_t g_reader_thread;
-static pthread_cond_t g_main_cond;
 
 typedef void (*state_cb_t)(GstState);
 static state_cb_t g_state_callback = NULL;
@@ -42,44 +35,6 @@ static long g_position = 0;
 
 static GMainLoop *g_main_loop;
 static GstElement *g_pipeline;
-static GstElement *g_filesrc;
-static GstElement *g_httpsrc;
-#if 0
-static GstElement *g_videosink;
-static GstElement *g_audiosink;
-#endif
-static const char* g_pipeline_name; /* TODO get rid of */
-
-GstElement *create_video_sink(void);
-GstElement *create_audio_sink(void);
-
-/* call only form bus context */
-static void trigger_callback(GstState state)
-{
-	if (g_state_callback != NULL)
-		g_state_callback(state);
-}
-
-void GStreamer_regStateCallback(state_cb_t callback)
-{
-	if (!g_initialized) {
-		g_error("GStreamer: library not initialized!\n");
-		assert(0);
-	}
-
-	g_state_callback = callback;
-}
-
-static void *main_thread_proc(void *arg)
-{
-	if (!g_thread_shutdown_flag) {
-		g_print("GStreamer: starting main loop\n");
-		g_main_loop_run(g_main_loop);
-	}
-
-	g_print("GStreamer: exiting main loop\n");
-	return NULL;
-}
 
 static const char *gststate_get_name(GstState state)
 {
@@ -195,155 +150,9 @@ static gboolean my_bus_callback(GstBus *bus, GstMessage *msg,
 	return 1;
 }
 
-static int cleanup_pipeline()
-{
-	GError *error = NULL;
-	GstIterator *iter;
-	GstIteratorResult res;
-	gpointer elts[2], element = NULL;
-	int i, ct;
 
-	ct = 0;
-	memset(elts, 0, sizeof(elts));
-
-	iter = gst_bin_iterate_elements(GST_BIN(g_pipeline));
-	res = gst_iterator_next(iter, &element);
-
-	while (res == GST_ITERATOR_OK) {
-		gchar *name;
-
-		assert(ct < (sizeof elts / sizeof(elts[0])));
-		elts[ct] = element;
-		ct++;
-
-		name = gst_object_get_name(GST_OBJECT(element));
-		if (name) {
-			g_printf("GS: removing pipe element: %s \n", name);
-			g_free (name);
-		}
-
-		gst_object_unref(element);
-		element = NULL;
-
-		res = gst_iterator_next(iter, &element);
-	}
-	gst_iterator_free (iter);
-
-	for (i = 0; i < ct; i++) {
-		gst_bin_remove(GST_BIN(g_pipeline), elts[i]);
-	}
-}
-
-int GStreamer_setMedia(const char *uri)
-{
-	GstElement *src, *sink;
-	int is_video, is_http = 1;
-	int ret = 0;
-
-	if (!g_initialized) {
-		g_error("GStreamer: library not initialized!\n");
-		return -1;
-	}
-
-	cleanup_pipeline();
-
-	pthread_mutex_lock(&g_mutex);
-
-	g_position = 0;
-	g_duration = 0;
-
-	g_print("GStreamer: playing : %s\n", uri);
-
-	is_video = strstr(uri, "264") != NULL;
-	is_http = !strncmp(uri, "http://", strlen("http://"));
-
-	g_printf("GStreamer: playing %s via %s\n", is_video ? "video" : "audio",
-			is_http ? "http" : "filesrc");
-
-	if (is_http)
-		g_object_set(G_OBJECT(g_httpsrc), "location", uri, NULL);
-	else
-		g_object_set(G_OBJECT(g_filesrc), "location", uri, NULL);
-
-	//sink = (is_video) ? g_videosink : g_audiosink;
-	sink = (is_video) ? create_video_sink() : create_audio_sink();
-	src = (is_http) ? g_httpsrc : g_filesrc;
-
-	gst_bin_add_many(GST_BIN(g_pipeline), src, sink, NULL);
-
-	if (!gst_element_link(src, sink)) {
-		g_error("GStreamer: failed to link %s with %s\n",
-				gst_element_get_name(src),
-				gst_element_get_name(sink));
-		return -1;
-	}
-
-	gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_PLAYING);
-	//gst_element_get_state(GST_ELEMENT(g_pipeline), ...);
-
-	/* TODO what is signalled? */
-	pthread_cond_signal(&g_main_cond);
-	pthread_mutex_unlock(&g_mutex);
-
-	return ret;
-}
-
-int GStreamer_stop()
-{
-	GstStateChangeReturn ret; 
-	GstState state, pending;
-
-	g_print("GStreamer: stop\n");
-	if (!g_initialized) {
-		g_error("GStreamer: library not initialized!\n");
-		return -1;
-	}
-
-	pthread_mutex_lock(&g_mutex);
-
-	g_duration = 0;
-	g_position = 0;
-
-	/* */
-	gst_element_get_state(GST_ELEMENT(g_pipeline), &state, &pending,
-			GST_CLOCK_TIME_NONE);
-
-	ret = gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL); 
-	if (ret == GST_STATE_CHANGE_FAILURE) {
-		g_error("Failed to stop pipeline ret == %d\n", ret);
-		pthread_mutex_unlock(&g_mutex);
-		return -1;
-	}
-
-	gst_element_get_state(GST_ELEMENT(g_pipeline), &state, &pending,
-			GST_CLOCK_TIME_NONE);
-	g_print("GStreamer: State change: CUR: '%s', PENDING: '%s'\n",
-			gststate_get_name(state),
-			gststate_get_name(pending));
-
-
-#if 0
-	/* TODO, hmm */
-	trigger_callback(GST_STATE_NULL);
-#endif
-	pthread_mutex_unlock(&g_mutex);
-	return 0;
-}
-
-GstElement *create_video_sink()
-{
-	GstElement *bin, *decoder = NULL;
-	GstIterator *iter;
-	GstIteratorResult res;
-	GError *error = NULL;
-	GstPad *pad;
-	gpointer element = NULL;
-	const char* decoder_name;
-
-#ifndef DESKTOP 
-	/* create pipeline */                                                                                 
-	decoder_name = "tividdec20";
-	bin = gst_parse_launch_full("TIViddec2 genTimeStamps=FALSE \
+#ifndef DESKTOP
+const char *video_pipe_desc =  "TIViddec2 genTimeStamps=FALSE \
 			    engineName=decode \
 			    codecName=h264dec numFrames=-1 \
 			! videoscale method=0 \
@@ -352,112 +161,75 @@ GstElement *create_video_sink()
 			! video/x-raw-rgb, bpp=16 \
 			! TIDmaiVideoSink displayStd=fbdev displayDevice=/dev/fb0 videoStd=QVGA \
 			    videoOutput=LCD resizer=FALSE accelFrameCopy=TRUE",
-			NULL, 0, &error);                                      
 #else
-	decoder_name = "decodebin";
-	bin = gst_parse_launch_full("decodebin \
+const char video_pipe_desc = "decodebin \
 			! videoscale method=0 \
 			! video/x-raw-yuv, format=(fourcc)I420, width=320, height=240 \
 			! xvimagesink",
-			NULL, 0, &error);                                      
 #endif
 
+
+
+GstElement *create_video_pipe(const char *filename)
+{
+	GstElement *bin;
+	int ct, siz;
+	char *buf;
+
+	siz = sizeof(video_pipe_desc) + strlen(filename) + 80;
+	buf = malloc(siz);
+	if (!buf) {
+		g_error("failed to allocate memory");
+		return NULL;
+	}
+
+	sprintf(buf, "filessrc location=%s !", filename);
+	strcat(buf, video_pipe_desc);
+	bin = gst_parse_launch_full(buf, NULL, 0, &error);                                      
+	
 	if (!bin) {
 		g_error("GStreamer: failed to parse video sink pipeline\n");
-		return NULL;
+		goto err_free;
 	}              
 
-	gst_object_set_name(GST_OBJECT(bin), "video-sink");
-
-	iter = gst_bin_iterate_elements(GST_BIN(bin));
-	res = gst_iterator_next (iter, &element);
-	while (res == GST_ITERATOR_OK) {
-		gchar *name;
-
-		name = gst_object_get_name(GST_OBJECT (element));
-		if (name) {
-			if (!strncmp(name, decoder_name, strlen(decoder_name))) {
-				decoder = GST_ELEMENT(element); 
-			}
-			g_printf("GS: video sink element: %s \n", name);
-			g_free (name);
-		}
-
-		gst_object_unref (element);
-		element = NULL;
-
-		res = gst_iterator_next (iter, &element);
-	}
-	gst_iterator_free (iter);
-
-	if (!decoder) {
-		/* mem leak */
-		g_printf("decoder element not found\n");
-		return NULL;
-	}
-
-	/* add ghostpad */
-	pad = gst_element_get_static_pad (decoder, "sink");
-	gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad));
-	gst_object_unref(GST_OBJECT(pad));
-
+	gst_object_set_name(GST_OBJECT(bin), "video-pipe");
 	return bin;
+
+err_free:
+	free(buf);
+	return NULL;
 }
 
 GstElement *create_audio_sink()
 {
-	GstElement *bin, *decoder = NULL;
-	GstIterator *iter;
-	GstIteratorResult res;
-	GError *error = NULL;
-	GstPad *pad;
-	gpointer element = NULL;
+	GstElement *bin;
+	int ct, siz;
+	char *buf;
 
-	bin = gst_parse_launch_full("decodebin ! queue ! audioconvert \
+	siz = sizeof(video_pipe_desc) + strlen(filename) + 80;
+	buf = malloc(siz);
+	if (!buf) {
+		g_error("failed to allocate memory");
+		return NULL;
+	}
+
+	sprintf(buf, "filessrc location=%s", filename);
+	strcat(buf, " ! decodebin ! queue ! audioconvert \
 			! audioresample \
-			! autoaudiosink",
-			NULL, 0, &error);                                      
+			! autoaudiosink");
+	bin = gst_parse_launch_full(buf, NULL, 0, &error);                                      
 
 	if (!bin) {
-		g_error("GStreamer: failed to parse audio sink pipeline\n");
-		return NULL;
+		g_error("GStreamer: failed to parse video sink pipeline\n");
+		goto err_free;
 	}              
 
-	gst_object_set_name(GST_OBJECT(bin), "audio-sink");
-
-	iter = gst_bin_iterate_elements(GST_BIN(bin));
-	res = gst_iterator_next (iter, &element);
-	while (res == GST_ITERATOR_OK) {
-		gchar *name;
-
-		name = gst_object_get_name(GST_OBJECT (element));
-		if (name) {
-			if (!strncmp(name, "decodebin", strlen("decodebin"))) {
-				decoder = GST_ELEMENT(element); 
-			}
-			g_printf("GS: audio sink element: %s \n", name);
-			g_free (name);
-		}
-
-		gst_object_unref (element);
-		element = NULL;
-
-		res = gst_iterator_next (iter, &element);
-	}
-	gst_iterator_free (iter);
-
-	if (!decoder) {
-		/* mem leak */
-		g_printf("decoder element not found\n");
-		return NULL;
-	}
-
-	/* add ghostpad */
-	pad = gst_element_get_static_pad(decoder, "sink");
-	gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad));
-	gst_object_unref(GST_OBJECT(pad));
-
+	gst_object_set_name(GST_OBJECT(bin), "audio-pipe");
 	return bin;
+
+err_free:
+	free(buf);
+	return NULL;
 }
 
 int GStreamer_init(const char *mplayer)
@@ -568,24 +340,15 @@ void GStreamer_destroy()
 	g_state_callback = NULL;
 	g_thread_shutdown_flag = 1;
 
-	g_main_loop_quit(g_main_loop);
 	pthread_cond_signal(&g_main_cond);
 
 	g_printf("GStreamer: wait main loop thread\n");
 	pthread_join(g_reader_thread, NULL);
 	g_printf("GStreamer: wait main loop joined\n");
 
-	pthread_mutex_lock(&g_mutex);
-	pthread_cond_destroy(&g_main_cond);
 
 	gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL);
 	gst_object_unref(GST_OBJECT(g_pipeline));
-	gst_object_unref(GST_OBJECT(g_filesrc));
-	gst_object_unref(GST_OBJECT(g_httpsrc));
-
-	sleep(1);
-	pthread_mutex_unlock(&g_mutex);
-	pthread_mutex_destroy(&g_mutex);
 }
 
 static pthread_mutex_t g_cb_mut = PTHREAD_MUTEX_INITIALIZER;
@@ -617,7 +380,7 @@ static void my_state_callback(GstState state)
 		my_state = MY_READY;
 		break;
 	case GST_STATE_NULL:
-		my_state = MY_NULL;
+		g_main_loop_quit(g_main_loop);
 		break;
 	default:
 		assert(0);
@@ -638,6 +401,22 @@ struct timespec calc_delay(int sec)
 	timeout.tv_nsec = now.tv_usec * 1000;
 	return timeout;
 }
+
+	gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_PLAYING);
+
+	ret = gst_element_set_state(GST_ELEMENT(g_pipeline), GST_STATE_NULL); 
+	if (ret == GST_STATE_CHANGE_FAILURE) {
+		g_error("Failed to stop pipeline ret == %d\n", ret);
+		pthread_mutex_unlock(&g_mutex);
+		return -1;
+	}
+
+	gst_element_get_state(GST_ELEMENT(g_pipeline), &state, &pending,
+			GST_CLOCK_TIME_NONE);
+	g_print("GStreamer: State change: CUR: '%s', PENDING: '%s'\n",
+			gststate_get_name(state),
+			gststate_get_name(pending));
+
 
 int main(int argc, char* argv[])
 {
@@ -676,6 +455,8 @@ int main(int argc, char* argv[])
 			pthread_cond_wait(&g_cb_cond, &g_cb_mut);
 		}
 	}
+
+	g_main_loop_run(g_main_loop);
 
 	GStreamer_destroy();
 	pthread_cond_destroy(&g_cb_cond);
