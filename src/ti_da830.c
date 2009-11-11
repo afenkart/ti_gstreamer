@@ -8,7 +8,7 @@
 #include <signal.h>
 #include <assert.h>
 
-#define DESKTOP
+//#define DESKTOP
 
 #ifndef DESKTOP
 static const char video_pipe_desc[] =  "TIViddec2 genTimeStamps=FALSE \
@@ -27,10 +27,9 @@ static const char video_pipe_desc[] = "decodebin \
 			! xvimagesink";
 #endif
 
-static const char audio_pipe_desc[] = "decodebin ! queue ! audioconvert \
+static const char audio_pipe_desc[] = "decodebin ! audioconvert \
 			! audioresample \
 			! autoaudiosink";
-
 
 const char filesrc_desc[] = "filesrc location=%s ! ";
 const char httpsrc_desc[] = "souphttsrc location=%s ! ";
@@ -59,7 +58,7 @@ static void trigger_callback(GstState state);
 
 /* http://<xxx>/manual/html/section-bus-message-types.html */
 static gboolean my_bus_callback(GstBus *bus, GstMessage *msg,
-	gpointer user_data)
+		gpointer user_data)
 {
 	GstMessageType msgType;
 	GstObject *msgSrc;
@@ -201,7 +200,6 @@ GstElement *create_audio_pipe(const char *filename)
 	return bin;
 }
 
-//static void handler(int sig, siginfo_t *si, void *uc)
 typedef void (*sa_sigaction_t)(int, siginfo_t *, void *);
 void my_handler(int, siginfo_t*, void *);
 
@@ -261,7 +259,8 @@ void start_timer(int sec)
 
 void my_handler(int sig, siginfo_t *si, void *uc)
 {
-	printf("timer xx\n");
+	printf("timer event triggered. setting state to paused\n");
+	gst_element_set_state(g_pipeline, GST_STATE_PAUSED);
 }
 
 GMainLoop *g_main_loop;
@@ -270,18 +269,31 @@ static void trigger_callback(GstState state)
 	static int has_played = 0;
 	switch (state) {
 	case GST_STATE_READY:
-		g_printf("pipe is ready\n");
-		gst_element_set_state(g_pipeline, GST_STATE_PLAYING);
+		if (has_played) {
+			g_printf("pipe is ready. setting state null\n");
+			gst_element_set_state(g_pipeline, GST_STATE_NULL);
+			g_main_loop_quit(g_main_loop);
+		} else {
+			g_printf("pipe is ready. setting state to playing\n");
+			gst_element_set_state(g_pipeline, GST_STATE_PLAYING);
+		}
 		break;
 	case GST_STATE_PLAYING:
-		g_printf("pipe is playing\n");
+		has_played = 1;
+		g_printf("pipe is playing. starting timer to stop after 20s\n");
 		start_timer(20);
 		break;
 	case GST_STATE_PAUSED:
-		g_printf("pipe is paused\n");
+		if (has_played) {
+			g_printf("pipe is paused. setting to ready\n");
+			gst_element_set_state(g_pipeline, GST_STATE_READY);
+		} else {
+			g_printf("pipe is paused.\n");
+		}
 		break;
 	case GST_STATE_NULL:
-		g_printf("pipe is flushing\n");
+		/* virtual callback from eos */
+		g_printf("pipe is NULL. quitting main loop\n");
 		g_main_loop_quit(g_main_loop);
 		break;
 	}
@@ -316,7 +328,7 @@ int main(int argc, char* argv[])
 		g_printf("GStreamer: failed to initialize pipeline\n");
 		return -1;
 	}
-		
+
 	/* register callback */
 	bus = gst_pipeline_get_bus(GST_PIPELINE(g_pipeline));
 	gst_bus_add_watch(bus, my_bus_callback, NULL);
@@ -324,8 +336,8 @@ int main(int argc, char* argv[])
 
 	/* initialize pipeline */
 	if (gst_element_set_state(g_pipeline, GST_STATE_READY) ==
-		GST_STATE_CHANGE_FAILURE) {
-	  g_error("GStreamer: could not set pipeline to ready\n");
+			GST_STATE_CHANGE_FAILURE) {
+		g_error("GStreamer: could not set pipeline to ready\n");
 	}
 
 	/* start main loop */
